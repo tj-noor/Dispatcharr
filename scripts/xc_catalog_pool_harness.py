@@ -8,9 +8,12 @@ report.  Run against an isolated container before production deployment.
 import argparse
 import concurrent.futures
 import os
+import socket
+import ssl
 import statistics
 import sys
 import time
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -38,14 +41,30 @@ def complete_request(url, timeout):
     return time.monotonic() - started, size
 
 
-def cancelled_request(url, timeout):
+def cancelled_request(url, timeout, cancel_delay):
+    """Send a valid request and close the TCP connection before reading it."""
     started = time.monotonic()
-    response = requests.get(
-        url, params=request_params(), timeout=timeout, stream=True
-    )
-    response.raise_for_status()
-    next(response.iter_content(1), b"")
-    response.close()
+    parsed = urlsplit(url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    query = urlencode(request_params())
+    request = (
+        f"GET {path}?{query} HTTP/1.1\r\n"
+        f"Host: {parsed.hostname}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+
+    connection = socket.create_connection((parsed.hostname, port), timeout=timeout)
+    if parsed.scheme == "https":
+        context = ssl.create_default_context()
+        connection = context.wrap_socket(
+            connection, server_hostname=parsed.hostname
+        )
+    try:
+        connection.sendall(request)
+        time.sleep(cancel_delay)
+    finally:
+        connection.close()
     return time.monotonic() - started
 
 
@@ -73,6 +92,7 @@ def main():
     parser.add_argument("--sequential", type=int, default=50)
     parser.add_argument("--cancelled", type=int, default=32)
     parser.add_argument("--concurrency", type=int, default=32)
+    parser.add_argument("--cancel-delay", type=float, default=0.02)
     parser.add_argument("--timeout", type=float, default=10.0)
     args = parser.parse_args()
 
@@ -93,7 +113,9 @@ def main():
     ) as executor:
         cancelled_times = list(
             executor.map(
-                lambda _index: cancelled_request(url, args.timeout),
+                lambda _index: cancelled_request(
+                    url, args.timeout, args.cancel_delay
+                ),
                 range(args.cancelled),
             )
         )
