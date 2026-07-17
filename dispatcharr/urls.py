@@ -7,8 +7,12 @@ from .routing import websocket_urlpatterns
 from apps.output.views import xc_player_api, xc_panel_api, xc_get, xc_xmltv
 from apps.proxy.live_proxy.views import stream_xc
 from apps.proxy.vod_proxy.views import stream_xc_movie, stream_xc_episode
+from .health import live as health_live, ready as health_ready
 
 urlpatterns = [
+    # Container probes must be resolved before the React catch-all.
+    path("health/live", health_live, name="health_live"),
+    path("health/ready", health_ready, name="health_ready"),
     # API Routes
     path("api/", include(("apps.api.urls", "api"), namespace="api")),
     path("api", RedirectView.as_view(url="/api/", permanent=True)),
