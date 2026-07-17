@@ -27,6 +27,11 @@ import regex
 from core.utils import log_system_event, build_absolute_uri_with_port
 import hashlib
 from apps.output.epg import generate_epg, generate_dummy_programs
+from apps.output.catalog_cache import (
+    cache_catalog,
+    catalog_cache_key,
+    get_cached_catalog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -439,9 +444,12 @@ def xc_player_api(request, full=False):
         # performs a fallback lookup) to escape into the response iterator keeps
         # that checkout alive until the client finishes or disconnects.
         try:
-            payload = _xc_materialize_live_catalog(
-                request, user, request.GET.get("category_id")
-            )
+            category_id = request.GET.get("category_id")
+            cache_key = catalog_cache_key(request, user, category_id)
+            payload = get_cached_catalog(cache_key)
+            if payload is None:
+                payload = _xc_materialize_live_catalog(request, user, category_id)
+                cache_catalog(cache_key, payload)
         finally:
             close_old_connections()
         return StreamingHttpResponse(

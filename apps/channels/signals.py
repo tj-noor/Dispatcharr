@@ -5,7 +5,15 @@ from django.dispatch import receiver
 from django.utils.timezone import now, is_aware, make_aware
 from celery.result import AsyncResult
 from django_celery_beat.models import ClockedSchedule, PeriodicTask
-from .models import Channel, Stream, ChannelProfile, ChannelProfileMembership, Recording
+from .models import (
+    Channel,
+    ChannelGroup,
+    ChannelOverride,
+    ChannelProfile,
+    ChannelProfileMembership,
+    Recording,
+    Stream,
+)
 from apps.m3u.models import M3UAccount
 from apps.epg.tasks import parse_programs_for_tvg_id
 import json
@@ -14,6 +22,35 @@ from .tasks import run_recording, prefetch_recording_artwork
 from datetime import timedelta
 
 logger = logging.getLogger(__name__)
+
+
+def _bump_xc_catalog_after_commit(**kwargs):
+    """Invalidate materialized XC catalogs only after a successful DB commit."""
+    from django.db import transaction
+    from apps.output.catalog_cache import bump_catalog_revision
+
+    transaction.on_commit(bump_catalog_revision)
+
+
+for _catalog_model in (
+    Channel,
+    ChannelGroup,
+    ChannelOverride,
+    ChannelProfile,
+    ChannelProfileMembership,
+):
+    post_save.connect(
+        _bump_xc_catalog_after_commit,
+        sender=_catalog_model,
+        weak=False,
+        dispatch_uid=f"xc_catalog_save_{_catalog_model._meta.label_lower}",
+    )
+    post_delete.connect(
+        _bump_xc_catalog_after_commit,
+        sender=_catalog_model,
+        weak=False,
+        dispatch_uid=f"xc_catalog_delete_{_catalog_model._meta.label_lower}",
+    )
 
 @receiver(m2m_changed, sender=Channel.streams.through)
 def update_channel_tvg_id_and_logo(sender, instance, action, reverse, model, pk_set, **kwargs):

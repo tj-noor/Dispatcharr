@@ -79,10 +79,11 @@ class XcLiveCatalogDbLifecycleTests(SimpleTestCase):
         mock_close.assert_called_once()
 
     @patch("apps.output.views.close_old_connections")
+    @patch("apps.output.views.catalog_cache_key", return_value=None)
     @patch("apps.output.views._xc_materialize_live_catalog", return_value=b"[]")
     @patch("apps.output.views.xc_get_user")
     def test_more_than_pool_size_releases_setup_and_iterator_checkouts(
-        self, mock_get_user, _materialize, mock_close
+        self, mock_get_user, _materialize, _cache_key, mock_close
     ):
         mock_get_user.return_value = object()
 
