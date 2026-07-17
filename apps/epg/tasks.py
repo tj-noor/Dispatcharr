@@ -683,7 +683,45 @@ def _refresh_epg_data_impl(source_id, force=False):
         pass
 
 
+def _publish_epg_cache_file(temp_download_path, cache_dir, source_id, is_compressed):
+    """Publish a downloaded EPG file without exposing partial or missing cache files."""
+    xml_path = os.path.join(cache_dir, f"{source_id}.xml")
+    extraction_path = None
+
+    try:
+        if is_compressed:
+            extraction_path = os.path.join(
+                cache_dir,
+                f".{source_id}.{uuid.uuid4().hex}.extract.tmp",
+            )
+            extracted = extract_compressed_file(
+                temp_download_path,
+                extraction_path,
+                delete_original=False,
+            )
+            if not extracted:
+                raise ValueError(
+                    f"Failed to extract downloaded EPG file for source {source_id}"
+                )
+            os.replace(extracted, xml_path)
+        else:
+            os.replace(temp_download_path, xml_path)
+
+        return xml_path
+    finally:
+        # os.replace removes the staging file on success. Clean up only files
+        # still present after an extraction or publication failure.
+        for path in (extraction_path, temp_download_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as exc:
+                    logger.warning("Failed to remove EPG staging file %s: %s", path, exc)
+
+
 def fetch_xmltv(source):
+    temp_download_path = None
+
     # Handle cases with local file but no URL
     if not source.url and source.file_path and os.path.exists(source.file_path):
         logger.info(f"Using existing local file for EPG source: {source.name} at {source.file_path}")
@@ -822,8 +860,12 @@ def fetch_xmltv(source):
             cache_dir = os.path.join(settings.MEDIA_ROOT, "cached_epg")
             os.makedirs(cache_dir, exist_ok=True)
 
-            # Create temporary download file with .tmp extension
-            temp_download_path = os.path.join(cache_dir, f"{source.id}.tmp")
+            # Each fetch needs its own staging file because channel recovery
+            # tasks can fetch the same EPG source concurrently.
+            temp_download_path = os.path.join(
+                cache_dir,
+                f".{source.id}.{uuid.uuid4().hex}.download.tmp",
+            )
 
             # Check if we have content length for progress tracking
             total_size = int(response.headers.get('content-length', 0))
@@ -885,74 +927,29 @@ def fetch_xmltv(source):
 
             logger.debug(f"File format detection results: type={format_type}, compressed={is_compressed}, extension={file_extension}")
 
-            # Ensure consistent final paths
-            compressed_path = os.path.join(cache_dir, f"{source.id}{file_extension}" if is_compressed else f"{source.id}.compressed")
-            xml_path = os.path.join(cache_dir, f"{source.id}.xml")
-
-            # Clean up old files before saving new ones
-            if os.path.exists(compressed_path):
-                try:
-                    os.remove(compressed_path)
-                    logger.debug(f"Removed old compressed file: {compressed_path}")
-                except OSError as e:
-                    logger.warning(f"Failed to remove old compressed file: {e}")
-
-            if os.path.exists(xml_path):
-                try:
-                    os.remove(xml_path)
-                    logger.debug(f"Removed old XML file: {xml_path}")
-                except OSError as e:
-                    logger.warning(f"Failed to remove old XML file: {e}")
-
-            # Rename the temp file to appropriate final path
+            # Publish only complete files. os.replace keeps the previous cache
+            # readable until the new file is ready and is atomic on this volume.
             if is_compressed:
-                try:
-                    os.rename(temp_download_path, compressed_path)
-                    logger.debug(f"Renamed temp file to compressed file: {compressed_path}")
-                    current_file_path = compressed_path
-                except OSError as e:
-                    logger.error(f"Failed to rename temp file to compressed file: {e}")
-                    current_file_path = temp_download_path  # Fall back to using temp file
-            else:
-                try:
-                    os.rename(temp_download_path, xml_path)
-                    logger.debug(f"Renamed temp file to XML file: {xml_path}")
-                    current_file_path = xml_path
-                except OSError as e:
-                    logger.error(f"Failed to rename temp file to XML file: {e}")
-                    current_file_path = temp_download_path  # Fall back to using temp file
+                logger.info(f"Extracting compressed EPG download for source {source.id}")
+                send_epg_update(source.id, "extracting", 0, message="Extracting downloaded file")
 
-            # Now extract the file if it's compressed
+            source.file_path = _publish_epg_cache_file(
+                temp_download_path,
+                cache_dir,
+                source.id,
+                is_compressed,
+            )
+            temp_download_path = None
+            source.extracted_file_path = None
+
             if is_compressed:
-                try:
-                    logger.info(f"Extracting compressed file {current_file_path}")
-                    send_epg_update(source.id, "extracting", 0, message="Extracting downloaded file")
-
-                    # Always extract to the standard XML path - set delete_original to True to clean up
-                    extracted = extract_compressed_file(current_file_path, xml_path, delete_original=True)
-
-                    if extracted:
-                        logger.info(f"Successfully extracted to {xml_path}, compressed file deleted")
-                        send_epg_update(source.id, "extracting", 100, message=f"File extracted successfully, temporary file removed")
-                        # Update to store only the extracted file path since the compressed file is now gone
-                        source.file_path = xml_path
-                        source.extracted_file_path = None
-                    else:
-                        logger.error("Extraction failed, using compressed file")
-                        send_epg_update(source.id, "extracting", 100, status="error", message="Extraction failed, using compressed file")
-                        # Use the compressed file
-                        source.file_path = current_file_path
-                        source.extracted_file_path = None
-                except Exception as e:
-                    logger.error(f"Error extracting file: {str(e)}", exc_info=True)
-                    send_epg_update(source.id, "extracting", 100, status="error", message=f"Error during extraction: {str(e)}")
-                    # Use the compressed file if extraction fails
-                    source.file_path = current_file_path
-                    source.extracted_file_path = None
-            else:
-                # It's already an XML file
-                source.file_path = current_file_path
-                source.extracted_file_path = None
+                logger.info(f"Successfully extracted to {source.file_path}")
+                send_epg_update(
+                    source.id,
+                    "extracting",
+                    100,
+                    message="File extracted successfully, temporary file removed",
+                )
 
             # Update the source's file paths
             source.save(update_fields=['file_path', 'status', 'extracted_file_path'])
@@ -1066,6 +1063,16 @@ def fetch_xmltv(source):
         # Ensure we update the download progress to 100 with error status
         send_epg_update(source.id, "downloading", 100, status="error", error=f"Error: {error_message}")
         return False
+    finally:
+        if temp_download_path and os.path.exists(temp_download_path):
+            try:
+                os.remove(temp_download_path)
+            except OSError as exc:
+                logger.warning(
+                    "Failed to remove EPG download staging file %s: %s",
+                    temp_download_path,
+                    exc,
+                )
 
 
 def extract_compressed_file(file_path, output_path=None, delete_original=False):
