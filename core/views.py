@@ -17,6 +17,7 @@ from core.models import StreamProfile, CoreSettings
 
 # Import the persistent lock (the “real” lock)
 from dispatcharr.persistent_lock import PersistentLock
+from dispatcharr.redaction import redact_sensitive_text, redact_url_credentials
 
 # Configure logging to output to the console.
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -79,7 +80,7 @@ def stream_view(request, channel_uuid):
 
             # Use the custom URL if available; otherwise, use the standard URL.
             input_url = stream.url
-            logger.debug("Input URL: %s", input_url)
+            logger.debug("Input URL: %s", redact_url_credentials(input_url))
 
             # Determine which profile we can use.
             m3u_profiles = m3u_account.profiles.all()
@@ -139,7 +140,7 @@ def stream_view(request, channel_uuid):
         logger.debug(f"  safe replace: {safe_replace_pattern}")
         # regex module accepts JS-style (?<name>...) named groups natively
         stream_url = regex.sub(active_profile.search_pattern, safe_replace_pattern, input_url)
-        logger.debug(f"Generated stream url: {stream_url}")
+        logger.debug(f"Generated stream url: {redact_url_credentials(stream_url)}")
 
         # Get the stream profile set on the channel.
         stream_profile = channel.stream_profile
@@ -155,11 +156,13 @@ def stream_view(request, channel_uuid):
 
         # Substitute placeholders in the parameters template.
         parameters = stream_profile.parameters.format(userAgent=user_agent, streamUrl=stream_url)
-        logger.debug("Formatted parameters: %s", parameters)
+        logger.debug("Formatted parameters: %s", redact_sensitive_text(parameters))
 
         # Build the final command.
         cmd = [stream_profile.command] + shlex_split(parameters)
-        logger.debug("Executing command: %s", cmd)
+        logger.debug(
+            "Executing command: %s", [redact_sensitive_text(part) for part in cmd]
+        )
 
         try:
             stdout_r, stdout_w = os.pipe()

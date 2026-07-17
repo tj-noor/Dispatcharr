@@ -25,6 +25,7 @@ from apps.accounts.authentication import ApiKeyAuthentication, QueryParamJWTAuth
 from apps.proxy.utils import check_user_stream_limits
 from dispatcharr.utils import network_access_allowed
 from core.utils import dispatcharr_user_agent
+from dispatcharr.redaction import redact_sensitive_text, redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,10 @@ def _get_stream_url_from_relation(relation):
         if hasattr(relation, 'get_stream_url'):
             url = relation.get_stream_url()
             if url:
-                logger.info(f"[VOD-URL] Built URL from get_stream_url(): {url}")
+                logger.info(
+                    f"[VOD-URL] Built URL from get_stream_url(): "
+                    f"{redact_url_credentials(url)}"
+                )
                 return url
             else:
                 logger.warning(f"[VOD-URL] get_stream_url() returned None")
@@ -402,9 +406,12 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
     if user is None and hasattr(request, "user") and request.user.is_authenticated:
         user = request.user
     logger.info(f"[VOD-REQUEST] Starting VOD stream request: {content_type}/{content_id}, session: {session_id}, profile: {profile_id}")
-    logger.info(f"[VOD-REQUEST] Full request path: {request.get_full_path()}")
+    logger.info(
+        f"[VOD-REQUEST] Full request path: "
+        f"{redact_sensitive_text(request.get_full_path())}"
+    )
     logger.info(f"[VOD-REQUEST] Request method: {request.method}")
-    logger.info(f"[VOD-REQUEST] Request headers: {dict(request.headers)}")
+    logger.info(f"[VOD-REQUEST] Request header names: {list(request.headers)}")
 
     try:
         client_ip, client_user_agent = get_client_info(request)
@@ -506,7 +513,10 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                 query_string = urlencode(query_params, doseq=True)
                 redirect_url = f"{request.path}?{query_string}"
 
-            logger.info(f"[VOD-SESSION] Redirecting to path-based URL: {redirect_url}")
+            logger.info(
+                f"[VOD-SESSION] Redirecting to path-based URL: "
+                f"{redact_url_credentials(redirect_url)}"
+            )
 
             # Persist the authenticated user to Redis so the streaming request
             # (which arrives without the token after the redirect) can resolve it.
@@ -573,7 +583,10 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
 
         # Get stream URL from relation
         stream_url = _get_stream_url_from_relation(relation)
-        logger.info(f"[VOD-CONTENT] Content URL: {stream_url or 'No URL found'}")
+        logger.info(
+            f"[VOD-CONTENT] Content URL: "
+            f"{redact_url_credentials(stream_url) if stream_url else 'No URL found'}"
+        )
 
         if not stream_url:
             logger.error(f"[VOD-ERROR] No stream URL available for {content_type} {content_id}")
@@ -592,11 +605,16 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
         # Connection tracking is handled by the connection manager
         # Transform URL based on profile
         final_stream_url = _transform_url(stream_url, m3u_profile)
-        logger.info(f"[VOD-URL] Final stream URL: {final_stream_url}")
+        logger.info(
+            f"[VOD-URL] Final stream URL: {redact_url_credentials(final_stream_url)}"
+        )
 
         # Validate stream URL
         if not final_stream_url or not final_stream_url.startswith(('http://', 'https://')):
-            logger.error(f"[VOD-ERROR] Invalid stream URL: {final_stream_url}")
+            logger.error(
+                f"[VOD-ERROR] Invalid stream URL: "
+                f"{redact_url_credentials(final_stream_url)}"
+            )
             return HttpResponse("Invalid stream URL", status=500)
 
         # Get connection manager (Redis-backed for multi-worker support)
@@ -714,7 +732,10 @@ def head_vod(request, content_type, content_id, session_id=None, profile_id=None
             'Range': 'bytes=0-1'  # Request only first 2 bytes
         }
 
-        logger.info(f"[VOD-HEAD] Making small range GET request to provider: {final_stream_url}")
+        logger.info(
+            f"[VOD-HEAD] Making small range GET request to provider: "
+            f"{redact_url_credentials(final_stream_url)}"
+        )
         response = requests.get(final_stream_url, headers=headers, timeout=30, allow_redirects=True, stream=True)
 
         # Check for range support - should be 206 for partial content

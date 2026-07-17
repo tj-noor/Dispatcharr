@@ -5,6 +5,7 @@ Enhanced VOD Connection Manager with Redis-based connection sharing for multi-wo
 import time
 import json
 import logging
+from dispatcharr.redaction import redact_url_credentials
 import threading
 import random
 import re
@@ -1360,7 +1361,7 @@ class MultiWorkerVODConnectionManager:
                 parsed_url.fragment
             ))
 
-            logger.info(f"Modified URL: {modified_url}")
+            logger.info(f"Modified URL: {redact_url_credentials(modified_url)}")
             return modified_url
 
         except Exception as e:

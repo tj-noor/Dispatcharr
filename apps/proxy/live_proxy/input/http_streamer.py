@@ -8,6 +8,7 @@ import os
 import requests
 from requests.adapters import HTTPAdapter
 from ..utils import get_logger
+from dispatcharr.redaction import redact_url_credentials
 
 logger = get_logger()
 
@@ -42,7 +43,9 @@ class HTTPStreamReader:
         self.thread = threading.Thread(target=self._read_stream, daemon=True)
         self.thread.start()
 
-        logger.info(f"Started HTTP stream reader thread for {self.url}")
+        logger.info(
+            f"Started HTTP stream reader thread for {redact_url_credentials(self.url)}"
+        )
         return self.pipe_read
 
     def _read_stream(self):
@@ -53,7 +56,7 @@ class HTTPStreamReader:
             if self.user_agent:
                 headers['User-Agent'] = self.user_agent
 
-            logger.info(f"HTTP reader connecting to {self.url}")
+            logger.info(f"HTTP reader connecting to {redact_url_credentials(self.url)}")
 
             # Create session
             self.session = requests.Session()
@@ -72,7 +75,10 @@ class HTTPStreamReader:
             )
 
             if self.response.status_code != 200:
-                logger.error(f"HTTP {self.response.status_code} from {self.url}")
+                logger.error(
+                    f"HTTP {self.response.status_code} from "
+                    f"{redact_url_credentials(self.url)}"
+                )
                 return
 
             logger.info(f"HTTP reader connected successfully, streaming data...")

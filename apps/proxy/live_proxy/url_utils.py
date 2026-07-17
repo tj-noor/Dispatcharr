@@ -17,6 +17,7 @@ from core.models import UserAgent, CoreSettings, StreamProfile
 from .utils import get_logger
 from uuid import UUID
 import requests
+from dispatcharr.redaction import redact_sensitive_text, redact_url_credentials
 
 logger = get_logger()
 
@@ -174,7 +175,7 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
     """
     try:
         logger.debug("Executing URL pattern replacement:")
-        logger.debug(f"  base URL: {input_url}")
+        logger.debug(f"  base URL: {redact_url_credentials(input_url)}")
         logger.debug(f"  search: {search_pattern}")
 
         # Convert JS-style backreferences in replace pattern: $<name> -> \g<name>, $1 -> \1
@@ -186,13 +187,16 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
         # Apply the transformation (regex module accepts JS-style (?<name>...) natively)
         stream_url, match_count = regex.subn(search_pattern, safe_replace_pattern, input_url)
         if match_count == 0:
-            logger.warning(f"URL pattern '{search_pattern}' did not match, falling back to original URL: {input_url}")
+            logger.warning(
+                f"URL pattern '{search_pattern}' did not match, falling back to original URL: "
+                f"{redact_url_credentials(input_url)}"
+            )
         else:
-            logger.info(f"Generated stream url: {stream_url}")
+            logger.info(f"Generated stream url: {redact_url_credentials(stream_url)}")
 
         return stream_url
     except Exception as e:
-        logger.error(f"Error transforming URL: {e}")
+        logger.error(f"Error transforming URL: {redact_sensitive_text(e)}")
         return input_url  # Return original URL on error
 
 def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] = None) -> dict:
@@ -448,7 +452,10 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
     # Check if URL uses non-HTTP protocols (UDP/RTP/RTSP)
     # These cannot be validated via HTTP methods, so we skip validation
     if url.startswith(('udp://', 'rtp://', 'rtsp://')):
-        logger.info(f"Skipping HTTP validation for non-HTTP protocol: {url}")
+        logger.info(
+            f"Skipping HTTP validation for non-HTTP protocol: "
+            f"{redact_url_credentials(url)}"
+        )
         return True, url, 200, "Non-HTTP protocol (UDP/RTP/RTSP) - validation skipped"
 
     try:
@@ -470,7 +477,10 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
             )
         except requests.exceptions.RequestException as e:
             head_request_success = False
-            logger.warning(f"Request error (HEAD), assuming HEAD not supported: {str(e)}")
+            logger.warning(
+                "Request error (HEAD), assuming HEAD not supported: "
+                f"{redact_sensitive_text(e)}"
+            )
 
         # If HEAD not supported, server will return 405 or other error
         if head_request_success and (200 <= head_response.status_code < 300):

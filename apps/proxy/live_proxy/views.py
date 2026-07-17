@@ -39,6 +39,7 @@ from .utils import get_logger
 from uuid import UUID
 import gevent
 from dispatcharr.utils import network_access_allowed
+from dispatcharr.redaction import redact_url_credentials
 from apps.proxy.utils import check_user_stream_limits
 
 logger = get_logger()
@@ -359,7 +360,10 @@ def stream_ts(request, channel_id, user=None, force_output_format=None):
                 )
 
                 # Try initial URL
-                logger.info(f"[{client_id}] Validating redirect URL: {stream_url}")
+                logger.info(
+                    f"[{client_id}] Validating redirect URL: "
+                    f"{redact_url_credentials(stream_url)}"
+                )
                 is_valid, final_url, status_code, message = validate_stream_url(
                     stream_url, user_agent=stream_user_agent, timeout=(5, 5)
                 )
@@ -395,7 +399,8 @@ def stream_ts(request, channel_id, user=None, force_output_format=None):
 
                         # Validate the alternate URL
                         logger.info(
-                            f"[{client_id}] Trying alternate stream #{alt['stream_id']}: {alt_info['url']}"
+                            f"[{client_id}] Trying alternate stream #{alt['stream_id']}: "
+                            f"{redact_url_credentials(alt_info['url'])}"
                         )
                         is_valid, final_url, status_code, message = validate_stream_url(
                             alt_info["url"],
@@ -419,7 +424,8 @@ def stream_ts(request, channel_id, user=None, force_output_format=None):
                 # Final decision based on validation results
                 if is_valid:
                     logger.info(
-                        f"[{client_id}] Redirecting to validated URL: {final_url} ({message})"
+                        f"[{client_id}] Redirecting to validated URL: "
+                        f"{redact_url_credentials(final_url)} ({message})"
                     )
 
                     # For non-HTTP protocols (RTSP/RTP/UDP), we need to manually create the redirect

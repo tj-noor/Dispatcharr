@@ -8,6 +8,7 @@ import subprocess
 import gevent
 import re
 from django.db import connection, close_old_connections
+from dispatcharr.redaction import redact_sensitive_text, redact_url_credentials
 from apps.proxy.config import TSConfig as Config
 from apps.channels.models import Channel, Stream
 from core.utils import log_system_event
@@ -351,7 +352,10 @@ class StreamManager:
             health_thread = threading.Thread(target=self._monitor_health, daemon=True)
             health_thread.start()
 
-            logger.info(f"Starting stream for URL: {self.url} for channel {self.channel_id}")
+            logger.info(
+                f"Starting stream for URL: {redact_url_credentials(self.url)} "
+                f"for channel {self.channel_id}"
+            )
 
             # Main stream switching loop - we'll try different streams if needed
             while self.running and stream_switch_attempts <= max_stream_switches:
@@ -395,7 +399,10 @@ class StreamManager:
                 self.stream_type = detect_stream_type(self.url)
                 if self.transcode == False and self.stream_type in (StreamType.HLS, StreamType.RTSP, StreamType.UDP):
                     stream_type_name = "HLS" if self.stream_type == StreamType.HLS else ("RTSP/RTP" if self.stream_type == StreamType.RTSP else "UDP")
-                    logger.info(f"Detected {stream_type_name} stream: {self.url} for channel {self.channel_id}")
+                    logger.info(
+                        f"Detected {stream_type_name} stream: "
+                        f"{redact_url_credentials(self.url)} for channel {self.channel_id}"
+                    )
                     logger.info(f"{stream_type_name} streams require FFmpeg for channel {self.channel_id}")
                     # Enable transcoding for HLS, RTSP/RTP, and UDP streams
                     self.transcode = True
@@ -413,7 +420,11 @@ class StreamManager:
                     if not self._ensure_owner_or_stop():
                         break
 
-                    logger.info(f"Connection attempt {self.retry_count + 1}/{self.max_retries} for URL: {self.url} for channel {self.channel_id}")
+                    logger.info(
+                        f"Connection attempt {self.retry_count + 1}/{self.max_retries} "
+                        f"for URL: {redact_url_credentials(self.url)} "
+                        f"for channel {self.channel_id}"
+                    )
 
                     # Handle connection based on whether we transcode or not
                     connection_result = False
@@ -468,7 +479,10 @@ class StreamManager:
                         # If we've reached max retries, mark this URL as failed
                         if self.retry_count >= self.max_retries:
                             url_failed = True
-                            logger.warning(f"Maximum retry attempts ({self.max_retries}) reached for URL: {self.url} for channel: {self.channel_id}")
+                            logger.warning(
+                                f"Maximum retry attempts ({self.max_retries}) reached for URL: "
+                                f"{redact_url_credentials(self.url)} for channel: {self.channel_id}"
+                            )
 
                             # Log connection error event
                             try:
@@ -477,7 +491,7 @@ class StreamManager:
                                     channel_id=self.channel_id,
                                     channel_name=self.channel_name,
                                     error_type='connection_failed',
-                                    url=self.url[:100] if self.url else None,
+                                    url=redact_url_credentials(self.url)[:100] if self.url else None,
                                     attempts=self.max_retries
                                 )
                             except Exception as e:
@@ -503,8 +517,8 @@ class StreamManager:
                                     channel_id=self.channel_id,
                                     channel_name=self.channel_name,
                                     error_type='connection_exception',
-                                    error_message=str(e)[:200],
-                                    url=self.url[:100] if self.url else None,
+                                    error_message=redact_sensitive_text(e)[:200],
+                                    url=redact_url_credentials(self.url)[:100] if self.url else None,
                                     attempts=self.max_retries
                                 )
                             except Exception as log_error:
@@ -517,14 +531,21 @@ class StreamManager:
 
                 # If URL failed and we're still running, try switching to another stream
                 if url_failed and self.running:
-                    logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying next stream for channel: {self.channel_id}")
+                    logger.info(
+                        f"URL {redact_url_credentials(self.url)} failed after "
+                        f"{self.retry_count} attempts, trying next stream for channel: {self.channel_id}"
+                    )
 
                     # Try to switch to next stream
                     switch_result = self._try_next_stream()
                     if switch_result:
                         # Successfully switched to a new stream, continue with the new URL
                         stream_switch_attempts += 1
-                        logger.info(f"Successfully switched to new URL: {self.url} (switch attempt {stream_switch_attempts}/{max_stream_switches}) for channel: {self.channel_id}")
+                        logger.info(
+                            f"Successfully switched to new URL: {redact_url_credentials(self.url)} "
+                            f"(switch attempt {stream_switch_attempts}/{max_stream_switches}) "
+                            f"for channel: {self.channel_id}"
+                        )
                         # Reset retry count for the new stream - important for the loop to work correctly
                         self.retry_count = 0
                         # Continue outer loop with new URL - DON'T add a break statement here
@@ -1133,7 +1154,10 @@ class StreamManager:
     def _establish_http_connection(self):
         """Establish HTTP connection using thread-based reader (same as transcode path)"""
         try:
-            logger.debug(f"Using HTTP streamer thread to connect to stream: {self.url}")
+            logger.debug(
+                "Using HTTP streamer thread to connect to stream: "
+                f"{redact_url_credentials(self.url)}"
+            )
 
             # Check if we already have active HTTP connections
             if self.current_response or self.current_session:
@@ -1317,10 +1341,13 @@ class StreamManager:
     def update_url(self, new_url, stream_id=None, m3u_profile_id=None):
         """Update stream URL and reconnect with proper cleanup for both HTTP and transcode sessions"""
         if new_url == self.url:
-            logger.info(f"URL unchanged: {new_url}")
+            logger.info(f"URL unchanged: {redact_url_credentials(new_url)}")
             return False
 
-        logger.info(f"Switching stream URL from {self.url} to {new_url} for channel {self.channel_id}")
+        logger.info(
+            f"Switching stream URL from {redact_url_credentials(self.url)} to "
+            f"{redact_url_credentials(new_url)} for channel {self.channel_id}"
+        )
 
         # Import both models for proper resource management
         from apps.channels.models import Stream, Channel
@@ -1943,11 +1970,14 @@ class StreamManager:
                 # Check if the new URL is the same as current URL
                 # This can happen when current_stream_id is None and we accidentally select the same stream
                 if new_url == self.url:
-                    logger.warning(f"Stream ID {stream_id} generates the same URL as current stream ({new_url}). "
+                    logger.warning(f"Stream ID {stream_id} generates the same URL as current stream ({redact_url_credentials(new_url)}). "
                                  f"Skipping this stream and trying next alternative.")
                     continue  # Try next stream instead of giving up
 
-                logger.info(f"Switching from URL {self.url} to {new_url} for channel {self.channel_id}")
+                logger.info(
+                    f"Switching from URL {redact_url_credentials(self.url)} to "
+                    f"{redact_url_credentials(new_url)} for channel {self.channel_id}"
+                )
 
                 # Just update the URL, don't stop the channel or release resources
                 switch_result = self.update_url(new_url, stream_id, profile_id)
