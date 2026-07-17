@@ -1,4 +1,5 @@
 """Shared configuration between proxy types"""
+import os
 import time
 from django.db import connection
 
@@ -81,7 +82,11 @@ class TSConfig(BaseConfig):
     """Configuration settings for TS proxy"""
 
     # Buffer settings
-    INITIAL_BEHIND_CHUNKS = 4  # How many chunks behind to start a client (4 chunks = ~1MB)
+    # Keep the upstream default unless an operator has benchmarked a smaller
+    # source buffer.  Two 256 KiB chunks is about 0.5s at 8 Mbps.
+    INITIAL_BEHIND_CHUNKS = max(
+        1, int(os.environ.get("DISPATCHARR_INITIAL_BUFFER_CHUNKS", "4"))
+    )
     CHUNK_BATCH_SIZE = 5       # How many chunks to fetch in one batch
     NEW_CLIENT_BEHIND_SECONDS = 5  # Start new clients this many seconds behind live (0 = start at live)
     KEEPALIVE_INTERVAL = 0.5   # Seconds between keepalive packets when at buffer head

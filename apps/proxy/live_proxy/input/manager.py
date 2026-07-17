@@ -7,6 +7,7 @@ import requests
 import subprocess
 import gevent
 import re
+import os
 from django.db import connection, close_old_connections
 from dispatcharr.redaction import redact_sensitive_text, redact_url_credentials
 from apps.proxy.config import TSConfig as Config
@@ -21,10 +22,64 @@ from ..url_utils import get_alternate_streams, get_stream_info_for_switch, get_s
 
 logger = get_logger()
 
+
+def tune_ffmpeg_copy_command(command):
+    """Apply bounded probe and low-latency mux options to FFmpeg copy profiles.
+
+    Re-encoding profiles are deliberately untouched.  Operators can tune the
+    bounded probe per deployment without changing a locked stream profile.
+    """
+    if not command or os.path.basename(command[0]).lower() != "ffmpeg":
+        return command
+
+    codec_args = [
+        command[index + 1].lower()
+        for index, value in enumerate(command[:-1])
+        if value in {"-c", "-codec", "-c:v", "-c:a"}
+    ]
+    if "copy" not in codec_args:
+        return command
+
+    tuned = list(command)
+    input_index = tuned.index("-i") if "-i" in tuned else 1
+    input_options = []
+    if "-probesize" not in tuned:
+        input_options.extend(
+            [
+                "-probesize",
+                os.environ.get("DISPATCHARR_FFMPEG_COPY_PROBESIZE", "1M"),
+            ]
+        )
+    if "-analyzeduration" not in tuned:
+        input_options.extend(
+            [
+                "-analyzeduration",
+                os.environ.get(
+                    "DISPATCHARR_FFMPEG_COPY_ANALYZEDURATION", "1000000"
+                ),
+            ]
+        )
+    if "-fflags" not in tuned:
+        input_options.extend(["-fflags", "+discardcorrupt+genpts+nobuffer"])
+    tuned[input_index:input_index] = input_options
+
+    output_index = tuned.index("pipe:1") if "pipe:1" in tuned else len(tuned)
+    output_options = []
+    if "-flush_packets" not in tuned:
+        output_options.extend(["-flush_packets", "1"])
+    if "-muxdelay" not in tuned:
+        output_options.extend(["-muxdelay", "0"])
+    if "-muxpreload" not in tuned:
+        output_options.extend(["-muxpreload", "0"])
+    tuned[output_index:output_index] = output_options
+    return tuned
+
 class StreamManager:
     """Manages a connection to a TS stream without using raw sockets"""
 
     def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None):
+        self._startup_started_at = time.monotonic()
+        self._startup_events = set()
         # Basic properties
         self.channel_id = channel_id
         # Cache channel name once to avoid repeated DB queries in hot retry/reconnect loops
@@ -133,6 +188,18 @@ class StreamManager:
         self._last_bitrate_db_save_time = 0
         self._bitrate_db_save_interval = 30  # seconds between DB writes
         self._bitrate_warmup_samples = 10   # discard first N samples while EMA stabilizes (~5s)
+
+    def _record_startup_event(self, event, **details):
+        """Emit each cold-start milestone once with monotonic elapsed time."""
+        if event in self._startup_events:
+            return
+        self._startup_events.add(event)
+        elapsed_ms = int((time.monotonic() - self._startup_started_at) * 1000)
+        detail_text = " ".join(f"{key}={value}" for key, value in details.items())
+        logger.info(
+            f"startup_timing channel={self.channel_id} event={event} "
+            f"elapsed_ms={elapsed_ms}{' ' + detail_text if detail_text else ''}"
+        )
 
     def _create_session(self):
         """Create and configure requests session with optimal settings"""
@@ -690,6 +757,7 @@ class StreamManager:
 
                 # Build and start transcode command
                 self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent)
+                self.transcode_cmd = tune_ffmpeg_copy_command(self.transcode_cmd)
 
                 # Store stream command for efficient log parser routing
                 self.stream_command = stream_profile.command
@@ -715,7 +783,12 @@ class StreamManager:
                 # Release the pool slot before posix_spawn or before returning on profile errors.
                 close_old_connections()
 
-            logger.debug(f"Starting transcode process: {self.transcode_cmd} for channel: {self.channel_id}")
+            logger.debug(
+                "Starting transcode process: %s for channel: %s",
+                [redact_sensitive_text(part) for part in self.transcode_cmd],
+                self.channel_id,
+            )
+            self._record_startup_event("ffmpeg_launch")
 
             import os as _os
             import shutil as _shutil
@@ -751,6 +824,7 @@ class StreamManager:
                     f"posix_spawn completed in {_time.monotonic() - _t0:.3f}s "
                     f"pid={_pid} for channel {self.channel_id}"
                 )
+                self._record_startup_event("ffmpeg_spawned")
 
                 _stderr_file = _os.fdopen(stderr_read, 'rb', buffering=0)
                 _stderr_read_transferred = True
@@ -942,6 +1016,7 @@ class StreamManager:
             # Track FFmpeg phases - once we see output info, we're past input phase
             if content_lower.startswith('output #') or 'encoder' in content_lower:
                 self.ffmpeg_input_phase = False
+                self._record_startup_event("ffmpeg_probe_complete")
 
             # Route to appropriate parser based on known command type
             from ..services.log_parsers import LogParserFactory
@@ -1154,6 +1229,7 @@ class StreamManager:
     def _establish_http_connection(self):
         """Establish HTTP connection using thread-based reader (same as transcode path)"""
         try:
+            self._record_startup_event("input_connect_start", transport="http")
             logger.debug(
                 "Using HTTP streamer thread to connect to stream: "
                 f"{redact_url_credentials(self.url)}"
@@ -1788,6 +1864,12 @@ class StreamManager:
 
             # Track chunk size before adding to buffer
             chunk_size = len(chunk)
+            self._record_startup_event(
+                "first_mpegts_packet",
+                bytes=chunk_size,
+                sync_byte=bool(chunk and chunk[0] == 0x47),
+                transport="ffmpeg" if self.transcode else "proxy",
+            )
             self._update_bytes_processed(chunk_size)
 
             # Add directly to buffer without TS-specific processing
@@ -1865,6 +1947,11 @@ class StreamManager:
 
                         from ..services.channel_service import ChannelService
 
+                        self._record_startup_event(
+                            "buffer_ready",
+                            chunks=current_buffer_index,
+                            required=initial_chunks_needed,
+                        )
                         ChannelService.promote_channel_when_buffer_ready(channel_id)
                     else:
                         logger.debug(f"Not changing state: channel {channel_id} already in {current_state} state")
