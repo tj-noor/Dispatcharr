@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 import base64
 import logging
 from django.db.models.functions import Lower
+from django.db import close_old_connections
 import os
 from apps.m3u.utils import calculate_tuner_count
 from apps.proxy.utils import get_user_active_connections
@@ -432,8 +433,19 @@ def xc_player_api(request, full=False):
     if action == "get_live_categories":
         return JsonResponse(xc_get_live_categories(user), safe=False)
     elif action == "get_live_streams":
+        # Do all ORM work and JSON serialization before the streaming response is
+        # constructed.  django-db-geventpool associates a checkout with the
+        # current greenlet, so allowing a lazy queryset (or a model property that
+        # performs a fallback lookup) to escape into the response iterator keeps
+        # that checkout alive until the client finishes or disconnects.
+        try:
+            payload = _xc_materialize_live_catalog(
+                request, user, request.GET.get("category_id")
+            )
+        finally:
+            close_old_connections()
         return StreamingHttpResponse(
-            _xc_stream_live_streams(request, user, request.GET.get("category_id")),
+            _xc_stream_materialized_catalog(payload),
             content_type="application/json",
         )
     elif action == "get_short_epg":
@@ -713,17 +725,30 @@ def xc_get_live_streams(request, user, category_id=None):
     ]
 
 
-def _xc_stream_live_streams(request, user, category_id=None):
-    channels, channel_num_map, _get_default_group_id, _logo_url_prefix, _logo_url_suffix = \
-        _xc_live_streams_setup(request, user, category_id)
-    yield "["
-    sep = ""
-    for channel in channels:
-        yield sep + json.dumps(
-            _xc_channel_entry(channel, channel_num_map, _get_default_group_id, _logo_url_prefix, _logo_url_suffix)
-        )
-        sep = ","
-    yield "]"
+def _xc_materialize_live_catalog(request, user, category_id=None):
+    """Return a fully materialized XC live-catalog JSON payload.
+
+    No queryset, model instance, lazy relation, or callable is allowed to escape
+    this function.  That makes it safe to release the database connection before
+    socket writes begin.
+    """
+    entries = xc_get_live_streams(request, user, category_id)
+    return json.dumps(entries, separators=(",", ":")).encode("utf-8")
+
+
+def _xc_stream_materialized_catalog(payload, chunk_size=64 * 1024):
+    """Yield an already serialized catalog and always release DB checkouts.
+
+    The iterator intentionally contains no ORM work.  The cleanup covers normal
+    completion, ``GeneratorExit`` from an early client disconnect, and an
+    exception injected by the WSGI write path.
+    """
+    try:
+        view = memoryview(payload)
+        for offset in range(0, len(view), chunk_size):
+            yield bytes(view[offset:offset + chunk_size])
+    finally:
+        close_old_connections()
 
 
 def xc_get_epg(request, user, short=False):

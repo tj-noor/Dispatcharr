@@ -9,7 +9,12 @@ from apps.channels.models import Channel, ChannelGroup, ChannelProfile, ChannelP
 from apps.epg.models import EPGData, EPGSource
 from apps.accounts.models import User
 from apps.m3u.models import M3UAccount
-from apps.output.views import xc_get_series, xc_get_vod_streams
+from apps.output.views import (
+    _xc_stream_materialized_catalog,
+    xc_get_series,
+    xc_get_vod_streams,
+    xc_player_api,
+)
 from apps.vod.models import (
     M3UMovieRelation,
     M3USeriesRelation,
@@ -37,6 +42,62 @@ def _epg_response_without_redis(cache_key, source, **kwargs):
     response["Content-Disposition"] = 'attachment; filename="Dispatcharr.xml"'
     response["Cache-Control"] = "no-cache"
     return response
+
+
+class XcLiveCatalogDbLifecycleTests(SimpleTestCase):
+    """XC socket lifetime must never own a geventpool DB checkout."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    @patch("apps.output.views.close_old_connections")
+    def test_complete_response_closes_iterator_connection(self, mock_close):
+        body = b"[" + (b"x" * 200) + b"]"
+
+        result = b"".join(_xc_stream_materialized_catalog(body, chunk_size=32))
+
+        self.assertEqual(result, body)
+        mock_close.assert_called_once()
+
+    @patch("apps.output.views.close_old_connections")
+    def test_early_disconnect_closes_iterator_connection(self, mock_close):
+        iterator = _xc_stream_materialized_catalog(b"x" * 200, chunk_size=32)
+
+        self.assertEqual(next(iterator), b"x" * 32)
+        iterator.close()
+
+        mock_close.assert_called_once()
+
+    @patch("apps.output.views.close_old_connections")
+    def test_write_failure_closes_iterator_connection(self, mock_close):
+        iterator = _xc_stream_materialized_catalog(b"x" * 200, chunk_size=32)
+        next(iterator)
+
+        with self.assertRaises(BrokenPipeError):
+            iterator.throw(BrokenPipeError("client disconnected"))
+
+        mock_close.assert_called_once()
+
+    @patch("apps.output.views.close_old_connections")
+    @patch("apps.output.views._xc_materialize_live_catalog", return_value=b"[]")
+    @patch("apps.output.views.xc_get_user")
+    def test_more_than_pool_size_releases_setup_and_iterator_checkouts(
+        self, mock_get_user, _materialize, mock_close
+    ):
+        mock_get_user.return_value = object()
+
+        # Production has eight connections per worker.  Twelve complete
+        # requests exercise more request lifecycles than one pool can satisfy
+        # if even a single checkout is retained by each response.
+        for _ in range(12):
+            request = self.factory.get(
+                "/player_api.php", {"action": "get_live_streams"}
+            )
+            response = xc_player_api(request)
+            self.assertEqual(b"".join(response.streaming_content), b"[]")
+
+        # One close after setup/materialization and one from iterator teardown.
+        self.assertEqual(mock_close.call_count, 24)
 
 
 class OutputEndpointTestMixin:
