@@ -3,6 +3,7 @@
 import logging
 import time
 
+from django.db import close_old_connections
 from django.http import StreamingHttpResponse
 
 logger = logging.getLogger(__name__)
@@ -187,6 +188,14 @@ def _stream_follow(redis, base_key, source, cache_ttl, lock_ttl, poll_interval, 
         _poll_wait(poll_interval)
 
 
+def _stream_with_db_cleanup(stream):
+    """Release the current greenlet's DB checkout when streaming ends."""
+    try:
+        yield from stream
+    finally:
+        close_old_connections()
+
+
 def stream_cached_response(
     cache_key,
     source,
@@ -232,7 +241,16 @@ def stream_cached_response(
                 max_follower_wait,
             )
 
-    response = StreamingHttpResponse(stream, content_type=content_type)
+    # Authentication and cache selection can touch the ORM before the response
+    # starts.  With django-db-geventpool that checkout belongs to this greenlet
+    # and otherwise remains held for the entire (potentially slow) XMLTV
+    # transfer.  Release it now; a cache-building source can check out a fresh
+    # connection later and the wrapper releases that connection on every exit.
+    close_old_connections()
+    response = StreamingHttpResponse(
+        _stream_with_db_cleanup(stream),
+        content_type=content_type,
+    )
     if filename:
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
     response["Cache-Control"] = "no-cache"

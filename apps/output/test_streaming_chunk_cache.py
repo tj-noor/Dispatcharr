@@ -1,6 +1,7 @@
 import threading
 import time
 from unittest import TestCase
+from unittest.mock import patch
 
 from apps.output.streaming_chunk_cache import (
     STATUS_BUILDING,
@@ -75,6 +76,40 @@ def _consume(response):
 
 
 class StreamingChunkCacheTests(TestCase):
+    @patch("apps.output.streaming_chunk_cache.close_old_connections")
+    def test_cache_hit_releases_db_before_and_after_stream(self, close_connections):
+        redis = FakeRedis()
+        redis.set(_ready_key("cache:ready"), "1")
+        redis.rpush(_chunks_key("cache:ready"), b"<tv/>")
+
+        response = stream_cached_response(
+            "cache:ready",
+            lambda: iter(()),
+            redis=redis,
+        )
+
+        close_connections.assert_called_once()
+        self.assertEqual(_consume(response), "<tv/>")
+        self.assertEqual(close_connections.call_count, 2)
+
+    @patch("apps.output.streaming_chunk_cache.close_old_connections")
+    def test_early_stream_close_releases_db(self, close_connections):
+        redis = FakeRedis()
+        redis.set(_ready_key("cache:ready"), "1")
+        redis.rpush(_chunks_key("cache:ready"), b"first")
+        redis.rpush(_chunks_key("cache:ready"), b"second")
+        response = stream_cached_response(
+            "cache:ready",
+            lambda: iter(()),
+            redis=redis,
+        )
+
+        iterator = iter(response.streaming_content)
+        self.assertEqual(next(iterator), b"first")
+        response.close()
+
+        self.assertEqual(close_connections.call_count, 2)
+
     def test_leader_caches_chunks_and_sets_ready(self):
         redis = FakeRedis()
         calls = []

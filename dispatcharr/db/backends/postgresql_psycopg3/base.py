@@ -20,10 +20,16 @@ class PostgresConnectionPool(DatabaseConnectionPool):
         maxsize = kwargs.pop("MAX_CONNS", 4)
         reuse = kwargs.pop("REUSE_CONNS", maxsize)
         max_lifetime = kwargs.pop("CONN_MAX_LIFETIME", None)
+        acquire_timeout = kwargs.pop("ACQUIRE_TIMEOUT", 1.0)
         self.args = args
         self.kwargs = kwargs
         self.kwargs["client_encoding"] = "UTF8"
-        super().__init__(maxsize, reuse, max_lifetime=max_lifetime)
+        super().__init__(
+            maxsize,
+            reuse,
+            max_lifetime=max_lifetime,
+            acquire_timeout=acquire_timeout,
+        )
 
     def create_connection(self):
         return self.connect(*self.args, **self.kwargs)
@@ -41,7 +47,12 @@ class DatabaseWrapper(DatabaseWrapperMixin, OriginalDatabaseWrapper):
 
         conn_params = super().get_connection_params()
         conn_params["application_name"] = db_application_name()
-        for attr in ("MAX_CONNS", "REUSE_CONNS", "CONN_MAX_LIFETIME"):
+        for attr in (
+            "MAX_CONNS",
+            "REUSE_CONNS",
+            "CONN_MAX_LIFETIME",
+            "ACQUIRE_TIMEOUT",
+        ):
             if attr in self.settings_dict["OPTIONS"]:
                 conn_params[attr] = self.settings_dict["OPTIONS"][attr]
         return conn_params

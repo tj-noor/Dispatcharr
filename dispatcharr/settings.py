@@ -120,6 +120,7 @@ DATABASE_CONN_MAX_AGE = 0  # geventpool intercepts close(); pool handles reuse
 # the warm-pool performance win over opening a new TCP session every request.
 # Override via DATABASE_POOL_CONN_MAX_LIFETIME; set 0 to disable. Default 600 (10 min).
 DATABASE_POOL_CONN_MAX_LIFETIME = int(os.environ.get("DATABASE_POOL_CONN_MAX_LIFETIME", "600"))
+DATABASE_POOL_ACQUIRE_TIMEOUT = float(os.environ.get("DATABASE_POOL_ACQUIRE_TIMEOUT", "1.0"))
 
 # Disable atomic requests for performance-sensitive views
 ATOMIC_REQUESTS = False
@@ -241,6 +242,7 @@ else:
                 "REUSE_CONNS": 3, # Connections to keep warm between requests
                 "pool": False,    # Disable Django's native psycopg3 pool; geventpool manages connections
                 "CONN_MAX_LIFETIME": DATABASE_POOL_CONN_MAX_LIFETIME or None,
+                "ACQUIRE_TIMEOUT": DATABASE_POOL_ACQUIRE_TIMEOUT,
             },
         }
     }

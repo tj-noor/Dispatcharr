@@ -18,10 +18,21 @@ from django_db_geventpool.backends.pool import DatabaseConnectionPool as BasePoo
 logger = logging.getLogger("django.geventpool")
 
 
+class DatabasePoolAcquireTimeout(TimeoutError):
+    """Raised instead of blocking a request forever on an exhausted pool."""
+
+
 class DatabaseConnectionPool(BasePool):
-    def __init__(self, maxsize: int = 100, reuse: int = 100, max_lifetime: float | None = None):
+    def __init__(
+        self,
+        maxsize: int = 100,
+        reuse: int = 100,
+        max_lifetime: float | None = None,
+        acquire_timeout: float = 1.0,
+    ):
         super().__init__(maxsize, reuse)
         self.max_lifetime = max_lifetime
+        self.acquire_timeout = acquire_timeout
 
     def _stamp_connection(self, conn) -> None:
         conn._dispatcharr_pool_created_at = time.monotonic()
@@ -46,7 +57,13 @@ class DatabaseConnectionPool(BasePool):
         conn = None
         try:
             if self.size >= self.maxsize or self.pool.qsize():
-                conn = self.pool.get()
+                try:
+                    conn = self.pool.get(timeout=self.acquire_timeout)
+                except queue.Empty as exc:
+                    raise DatabasePoolAcquireTimeout(
+                        "Timed out waiting for an available database connection "
+                        f"after {self.acquire_timeout}s"
+                    ) from exc
             else:
                 conn = self.pool.get_nowait()
 

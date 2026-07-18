@@ -2,7 +2,10 @@
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
-from dispatcharr.db.backends.postgresql_psycopg3.pool import DatabaseConnectionPool
+from dispatcharr.db.backends.postgresql_psycopg3.pool import (
+    DatabaseConnectionPool,
+    DatabasePoolAcquireTimeout,
+)
 
 
 class _TestPool(DatabaseConnectionPool):
@@ -63,3 +66,12 @@ class GeventPoolConnLifetimeTests(TestCase):
             pool.put(conn)
 
         self.assertEqual(pool.pool.qsize(), 1)
+
+    def test_exhausted_pool_has_bounded_acquisition(self):
+        pool = _TestPool(maxsize=1, reuse=1, acquire_timeout=0.01)
+        checked_out = pool.get()
+
+        with self.assertRaises(DatabasePoolAcquireTimeout):
+            pool.get()
+
+        pool.put(checked_out)
